@@ -1,0 +1,6 @@
+{
+  "summary": "Refined Provider-Independent Model Adapter and Registry Architecture specification including 6-entry model taxonomy, four-state feature representation (true/false/unknown/not_applicable), score semantics (decisionScore vs probability vs calibratedProbability), analysis-time model version locking, SSRF-hardened remote serving adapter, Python FastAPI ml-service skeleton, and expanded test suite.",
+  "updatedAt": "2026-11-03T18:54:56.522731356Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

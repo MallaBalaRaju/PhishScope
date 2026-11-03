@@ -1,0 +1,6 @@
+{
+  "name": "PhishScope Forensics & Threat Intel",
+  "description": "AI-powered email threat detection, email header forensics, infrastructure intelligence, and evidence-grounded phishing analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
