@@ -11,7 +11,8 @@ import {
   ArrowLeft,
   Calendar,
   User,
-  Mail
+  Mail,
+  Download
 } from 'lucide-react';
 import { EmailAnalysis } from '../types/forensics';
 import { OverviewTab } from './workspace/OverviewTab';
@@ -22,6 +23,7 @@ import { InfrastructureTab } from './workspace/InfrastructureTab';
 import { GraphView } from './workspace/GraphView';
 import { GeminiAssistantTab } from './workspace/GeminiAssistantTab';
 import { AnalystNotesTab } from './workspace/AnalystNotesTab';
+import { ExportModal } from './ExportModal';
 
 interface InvestigationWorkspaceProps {
   analysis: EmailAnalysis;
@@ -37,6 +39,7 @@ export const InvestigationWorkspace: React.FC<InvestigationWorkspaceProps> = ({
   onOpenReportModal
 }) => {
   const [activeTab, setActiveTab] = useState<string>('overview');
+  const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
 
   const tabs = [
     { id: 'overview', label: 'Overview & Risk', icon: ShieldAlert },
@@ -84,8 +87,20 @@ export const InvestigationWorkspace: React.FC<InvestigationWorkspaceProps> = ({
           </div>
         </div>
 
-        {/* Quick Assessment Badge */}
-        <div className="flex items-center gap-3">
+        {/* Quick Assessment Badge & Export Toolbar Action */}
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => setIsExportModalOpen(true)}
+            disabled={!analysis}
+            title={!analysis ? 'No investigation selected' : 'Export this investigation as JSON, PDF, or Excel'}
+            className="px-3.5 py-2 text-xs font-semibold text-slate-100 bg-slate-900 hover:bg-slate-800 hover:text-cyan-400 border border-slate-700 hover:border-cyan-500/50 rounded-lg shadow-sm transition-all flex items-center gap-2 group disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Download className="w-4 h-4 text-cyan-400 group-hover:scale-110 transition-transform" />
+            <span>Export Investigation</span>
+          </button>
+
+          <div className="h-8 w-px bg-slate-800 hidden sm:block" />
+
           <div className="text-right">
             <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
               Risk Score
@@ -163,6 +178,13 @@ export const InvestigationWorkspace: React.FC<InvestigationWorkspaceProps> = ({
           />
         )}
       </div>
+
+      {/* Forensic Investigation Export Modal */}
+      <ExportModal
+        analysis={analysis}
+        isOpen={isExportModalOpen}
+        onClose={() => setIsExportModalOpen(false)}
+      />
     </div>
   );
 };

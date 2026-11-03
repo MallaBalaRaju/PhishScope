@@ -26,7 +26,15 @@ export type AssessmentLabel =
   | 'inconclusive' 
   | 'insufficient_evidence';
 
-export type IpType = 'public' | 'private' | 'reserved' | 'loopback' | 'invalid';
+export type IpType = 
+  | 'public' 
+  | 'private' 
+  | 'reserved' 
+  | 'loopback' 
+  | 'documentation' 
+  | 'multicast' 
+  | 'unspecified' 
+  | 'invalid';
 
 export interface EvidenceFinding {
   findingId: string;
@@ -42,6 +50,7 @@ export interface EvidenceFinding {
 
 export interface ReceivedHop {
   hopIndex: number;
+  rawPositionFromTop: number; // 0 = topmost header (closest to recipient MTA)
   reportingServer?: string;
   receivingServer?: string;
   byServer?: string;
@@ -54,6 +63,9 @@ export interface ReceivedHop {
   rawHeader: string;
   parsingConfidence: number;
   suspiciousSignals: string[];
+  trustZone: 'trusted_border' | 'trusted_internal' | 'untrusted_external' | 'potentially_forged';
+  isBorderHop: boolean;
+  isPotentiallyForged: boolean;
 }
 
 export interface AttachmentMetadata {
@@ -132,10 +144,13 @@ export interface InfrastructureObservation {
   entity: string;
   entityType: 'ip' | 'domain' | 'asn' | 'nameserver' | 'url';
   provider: string;
+  queryTarget?: string;
+  queryTimestamp?: string;
+  returnedValue?: Record<string, any>;
   observation: Record<string, any>;
   retrievedAt: string;
   sourceReference: string;
-  status: 'available' | 'provider_unconfigured' | 'error' | 'internal_ip_skipped';
+  status: 'available' | 'provider_unconfigured' | 'nxdomain' | 'no_records' | 'timeout' | 'error' | 'internal_ip_skipped';
   reliabilityLimitations: string;
 }
 
@@ -164,6 +179,8 @@ export interface GraphEdge {
   confidence: 'confirmed_direct' | 'derived' | 'hypothesized';
   observedAt: string;
   supportingObservation?: string;
+  isDirectlyObserved?: boolean;
+  relationshipNature?: 'directly_observed' | 'inferred' | 'correlated';
 }
 
 export interface EmailEnvelope {
@@ -205,7 +222,15 @@ export interface EmailAnalysis {
   
   forensicFindings: {
     receivedHops: ReceivedHop[];
-    candidateSourceIps: Array<{ ip: string; confidence: string; justification: string; ipType: IpType }>;
+    candidateSourceIps: Array<{ 
+      ip: string; 
+      confidence: string; 
+      justification: string; 
+      ipType: IpType;
+      attributionCategory?: 'confirmed_originating' | 'candidate_originating' | 'observed_relay';
+      trustBoundary?: 'border' | 'untrusted_external' | 'internal_submission';
+      isSpecialPurpose?: boolean;
+    }>;
     routingAnomalies: EvidenceFinding[];
     identityMismatches: EvidenceFinding[];
     messageIdAnomalies: EvidenceFinding[];
@@ -218,10 +243,12 @@ export interface EmailAnalysis {
       result: AuthStatus;
       domain?: string;
       scope?: string;
+      helo?: string;
       ip?: string;
       mechanism?: string;
       rawSnippet?: string;
       alignmentWithFrom: AlignmentStatus;
+      alignmentMode?: 'strict' | 'relaxed';
       note: string;
     };
     dkim: {
@@ -230,15 +257,23 @@ export interface EmailAnalysis {
       selector?: string;
       headerSnippet?: string;
       alignmentWithFrom: AlignmentStatus;
+      alignmentMode?: 'strict' | 'relaxed';
       note: string;
     };
     dmarc: {
       result: AuthStatus;
       policy?: string;
+      fromDomain?: string;
       alignmentWithFrom: AlignmentStatus;
+      alignmentMode?: { spf: 'strict' | 'relaxed'; dkim: 'strict' | 'relaxed' };
+      spfAlignmentContribution?: boolean;
+      dkimAlignmentContribution?: boolean;
+      publishedPolicy?: string;
+      reportedProvenance?: 'header_reported' | 'independently_verified' | 'unverified' | 'missing';
       note: string;
     };
     provenance: 'reported_in_headers' | 'independently_verified' | 'unverified' | 'missing';
+    rawAuthResultsHeader?: string;
     limitations: string[];
   };
   
@@ -261,6 +296,10 @@ export interface EmailAnalysis {
     label: AssessmentLabel;
     confidenceLevel: 'high' | 'medium' | 'low';
     score: number; // 0 - 100 risk score
+    observedRiskScore?: number;
+    evidenceCoverageScore?: number;
+    availableEvidenceCategories?: string[];
+    unavailableEvidenceCategories?: string[];
     summary: string;
     primaryRiskFactors: string[];
     mitigatingFactors: string[];

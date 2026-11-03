@@ -12,6 +12,9 @@ export interface EvidenceFusionInput {
   hasHeaders: boolean;
   hasReceivedChain: boolean;
   hasAuthenticationHeaders: boolean;
+  hasBodyText: boolean;
+  hasBodyHtml: boolean;
+  hasAttachments: boolean;
   headerFindings: HeaderForensicResults;
   authFindings: AuthenticationForensicResults;
   urls: ExtractedUrl[];
@@ -24,7 +27,11 @@ export interface EvidenceFusionInput {
 export interface FusionAssessmentOutput {
   label: AssessmentLabel;
   confidenceLevel: 'high' | 'medium' | 'low';
-  score: number; // 0 - 100 risk score with explicit formula
+  score: number; // Combined/clamped risk score (0 - 100)
+  observedRiskScore: number;
+  evidenceCoverageScore: number;
+  availableEvidenceCategories: string[];
+  unavailableEvidenceCategories: string[];
   summary: string;
   primaryRiskFactors: string[];
   mitigatingFactors: string[];
@@ -33,187 +40,254 @@ export interface FusionAssessmentOutput {
 
 /**
  * Deterministic Evidence Fusion Engine
- * Explicitly breaks down risk evaluation into transparent, traceable components.
+ * Strictly separates:
+ * 1. Observed Risk Score (threat indicators detected)
+ * 2. Evidence Coverage (completeness of forensic data)
+ * 3. Assessment Confidence (certainty derived from coverage & signal consistency)
+ * 4. ML Contribution (transparently isolated)
+ *
+ * Core Integrity Law: Missing evidence is NEVER interpreted as benign evidence!
  */
 export function fuseEvidence(input: EvidenceFusionInput): FusionAssessmentOutput {
   const reasoningChain: string[] = [];
   const primaryRiskFactors: string[] = [];
   const mitigatingFactors: string[] = [];
+  const availableEvidenceCategories: string[] = [];
+  const unavailableEvidenceCategories: string[] = [];
 
-  // Check for insufficient evidence first
+  // --- Step 1: Evidence Coverage Assessment ---
+  let coverageWeight = 0;
+
+  if (input.hasHeaders) {
+    coverageWeight += 25;
+    availableEvidenceCategories.push('RFC 5322 Envelope Headers');
+  } else {
+    unavailableEvidenceCategories.push('RFC 5322 Envelope Headers (missing)');
+  }
+
+  if (input.hasReceivedChain && input.headerFindings.receivedHops.length > 0) {
+    coverageWeight += 20;
+    availableEvidenceCategories.push(`Received Relay Chain (${input.headerFindings.receivedHops.length} hops)`);
+  } else {
+    unavailableEvidenceCategories.push('Received Relay Chain (missing)');
+  }
+
+  if (input.hasAuthenticationHeaders && input.authFindings.authResultsHeaderPresent) {
+    coverageWeight += 25;
+    availableEvidenceCategories.push('MTA Authentication Headers (SPF/DKIM/DMARC)');
+  } else {
+    unavailableEvidenceCategories.push('MTA Authentication Headers (missing)');
+  }
+
+  if (input.hasBodyText || input.hasBodyHtml) {
+    coverageWeight += 15;
+    availableEvidenceCategories.push('Message Body Content (Text/HTML)');
+  } else {
+    unavailableEvidenceCategories.push('Message Body Content (missing)');
+  }
+
+  // URL / Attachment coverage
+  coverageWeight += 15;
+  if (input.urls.length > 0) {
+    availableEvidenceCategories.push(`Extracted Hyperlinks (${input.urls.length} URLs inspected)`);
+  }
+  if (input.attachments.length > 0) {
+    availableEvidenceCategories.push(`File Attachments (${input.attachments.length} items inspected)`);
+  }
+  if (input.urls.length === 0 && input.attachments.length === 0) {
+    availableEvidenceCategories.push('URL/Attachment Verification (None present in message)');
+  }
+
+  const evidenceCoverageScore = Math.min(100, coverageWeight);
+  reasoningChain.push(`--- Stage 1: Evidence Coverage Audit (${evidenceCoverageScore}% coverage) ---`);
+  reasoningChain.push(`Available categories: ${availableEvidenceCategories.join(', ')}`);
+  if (unavailableEvidenceCategories.length > 0) {
+    reasoningChain.push(`Unavailable categories: ${unavailableEvidenceCategories.join(', ')}`);
+  }
+
+  // If evidence is severely deficient (e.g. body-only paste with no headers)
   if (!input.hasHeaders && input.urls.length === 0 && input.attachments.length === 0) {
     return {
       label: 'insufficient_evidence',
       confidenceLevel: 'low',
-      score: 10,
-      summary: 'Insufficient forensic evidence: The provided input contains neither RFC 5322 headers, verifiable links, nor attachments. Complete email evaluation is impossible.',
-      primaryRiskFactors: ['Missing RFC headers', 'Missing routing hops'],
+      score: 15,
+      observedRiskScore: 15,
+      evidenceCoverageScore,
+      availableEvidenceCategories,
+      unavailableEvidenceCategories,
+      summary: 'Insufficient forensic evidence: The submission lacks RFC 5322 headers, Received routing hops, and actionable URLs/attachments. An authentic verdict cannot be determined.',
+      primaryRiskFactors: ['Missing RFC headers', 'Missing Received relay chain', 'No verifiable payload identifiers'],
       mitigatingFactors: [],
       reasoningChain: [
-        '1. Input contains no headers; Received chain and authentication could not be examined.',
-        '2. No verifiable URLs or attachments extracted from body.',
-        '3. Evaluated as Insufficient Evidence.'
+        '1. Envelope headers and Received routing chain are entirely absent.',
+        '2. Authentication records (SPF, DKIM, DMARC) could not be verified.',
+        '3. Evaluated as Insufficient Evidence with LOW confidence.'
       ]
     };
   }
 
-  let totalRisk = 0;
+  let observedThreatPoints = 0;
 
-  // 1. Authentication Analysis Component (Weight: Up to 35 pts)
-  reasoningChain.push('--- Evaluation Stage 1: Authentication Records ---');
+  // --- Step 2: Authentication Forensics (Max 35 pts) ---
+  reasoningChain.push('--- Stage 2: Authentication Evaluation ---');
   if (!input.hasAuthenticationHeaders) {
-    reasoningChain.push('Authentication headers (Authentication-Results, Received-SPF) are absent from the message.');
-    primaryRiskFactors.push('Unauthenticated message: No SPF, DKIM, or DMARC evaluation present in headers.');
-    totalRisk += 15;
+    observedThreatPoints += 15;
+    primaryRiskFactors.push('Unauthenticated message: No SPF, DKIM, or DMARC evaluation records in headers.');
+    reasoningChain.push('Authentication headers absent: unauthenticated mail (+15 risk points).');
   } else {
     // SPF
     if (input.authFindings.spf.result === 'fail') {
-      totalRisk += 25;
-      primaryRiskFactors.push(`SPF hard failure: Sending server is unauthorized for ${input.authFindings.spf.domain || 'domain'}.`);
+      observedThreatPoints += 25;
+      primaryRiskFactors.push(`SPF hard failure: Sending server unauthorized for ${input.authFindings.spf.domain || 'domain'}.`);
       reasoningChain.push('SPF evaluation resulted in hard FAIL (+25 risk points).');
     } else if (input.authFindings.spf.result === 'softfail') {
-      totalRisk += 15;
-      primaryRiskFactors.push(`SPF softfail: Sending server is not designated as authorized in ${input.authFindings.spf.domain || 'domain'} policy.`);
+      observedThreatPoints += 15;
+      primaryRiskFactors.push(`SPF softfail: Sending server is not explicitly designated in ${input.authFindings.spf.domain || 'domain'} SPF record.`);
       reasoningChain.push('SPF evaluation resulted in SOFTFAIL (+15 risk points).');
     } else if (input.authFindings.spf.result === 'pass') {
-      mitigatingFactors.push(`SPF passed for domain '${input.authFindings.spf.domain || 'domain'}'.`);
+      mitigatingFactors.push(`SPF passed for '${input.authFindings.spf.domain || 'domain'}'.`);
       reasoningChain.push('SPF evaluation passed (-10 risk offset).');
-      totalRisk = Math.max(0, totalRisk - 10);
+      observedThreatPoints = Math.max(0, observedThreatPoints - 10);
     }
 
     // DKIM
     if (input.authFindings.dkim.result === 'fail') {
-      totalRisk += 25;
-      primaryRiskFactors.push(`DKIM verification failure: Digital signature failed verification for domain '${input.authFindings.dkim.domain || 'domain'}'.`);
+      observedThreatPoints += 25;
+      primaryRiskFactors.push(`DKIM failure: Digital signature failed verification for '${input.authFindings.dkim.domain || 'domain'}'.`);
       reasoningChain.push('DKIM signature failed validation (+25 risk points).');
     } else if (input.authFindings.dkim.result === 'pass') {
-      mitigatingFactors.push(`DKIM signature verified for domain '${input.authFindings.dkim.domain || 'domain'}'.`);
+      mitigatingFactors.push(`DKIM signature verified for '${input.authFindings.dkim.domain || 'domain'}'.`);
       reasoningChain.push('DKIM signature passed verification (-10 risk offset).');
-      totalRisk = Math.max(0, totalRisk - 10);
+      observedThreatPoints = Math.max(0, observedThreatPoints - 10);
     }
 
     // DMARC
     if (input.authFindings.dmarc.result === 'fail') {
-      totalRisk += 20;
-      primaryRiskFactors.push('DMARC alignment failed: Message violates published domain alignment policy.');
+      observedThreatPoints += 20;
+      primaryRiskFactors.push('DMARC alignment failed: Neither SPF nor DKIM passed with aligned From domain.');
       reasoningChain.push('DMARC alignment failed (+20 risk points).');
     } else if (input.authFindings.dmarc.result === 'pass') {
       mitigatingFactors.push('DMARC policy satisfied with valid domain identifier alignment.');
       reasoningChain.push('DMARC policy satisfied (-15 risk offset).');
-      totalRisk = Math.max(0, totalRisk - 15);
+      observedThreatPoints = Math.max(0, observedThreatPoints - 15);
     }
   }
 
-  // 2. Identity and Routing Forensics Component (Weight: Up to 35 pts)
-  reasoningChain.push('--- Evaluation Stage 2: Header & Identity Consistency ---');
+  // --- Step 3: Header and Identity Consistency (Max 35 pts) ---
+  reasoningChain.push('--- Stage 3: Routing & Identity Forensics ---');
   for (const mismatch of input.headerFindings.identityMismatches) {
     if (mismatch.status === 'fail') {
-      totalRisk += 30;
+      observedThreatPoints += 30;
       primaryRiskFactors.push(mismatch.explanation);
-      reasoningChain.push(`High-severity identity anomaly: ${mismatch.value} (+30 risk points).`);
+      reasoningChain.push(`Severe identity deception: ${mismatch.value} (+30 risk points).`);
     } else if (mismatch.status === 'warning') {
-      totalRisk += 15;
+      observedThreatPoints += 15;
       primaryRiskFactors.push(mismatch.explanation);
       reasoningChain.push(`Moderate identity anomaly: ${mismatch.value} (+15 risk points).`);
     }
   }
 
   for (const anomaly of input.headerFindings.routingAnomalies) {
-    totalRisk += 15;
+    observedThreatPoints += 15;
     primaryRiskFactors.push(anomaly.explanation);
     reasoningChain.push(`Routing anomaly: ${anomaly.value} (+15 risk points).`);
   }
 
-  // 3. Content, URL and Attachment Forensics Component (Weight: Up to 40 pts)
-  reasoningChain.push('--- Evaluation Stage 3: Content, URLs & Attachments ---');
+  // --- Step 4: Content, URL & Attachment Forensics (Max 40 pts) ---
+  reasoningChain.push('--- Stage 4: URL, Content & Attachment Payloads ---');
   let hasAnchorMismatch = false;
-  let hasIpUrl = false;
-  let hasPunycode = false;
 
   for (const u of input.urls) {
     if (u.isMismatch) {
       hasAnchorMismatch = true;
-      totalRisk += 35;
+      observedThreatPoints += 35;
       primaryRiskFactors.push(`Deceptive anchor link: text claims '${u.displayText}' but navigates to '${u.domain}'.`);
-      reasoningChain.push(`Deceptive anchor text divergence observed for ${u.domain} (+35 risk points).`);
+      reasoningChain.push(`Deceptive anchor mismatch detected for ${u.domain} (+35 risk points).`);
     }
     if (u.isIpBased) {
-      hasIpUrl = true;
-      totalRisk += 25;
-      primaryRiskFactors.push(`Direct IP link: '${u.domain}' used as URL host.`);
-      reasoningChain.push(`Direct IP link address observed (+25 risk points).`);
+      observedThreatPoints += 25;
+      primaryRiskFactors.push(`Direct IP link: '${u.domain}' used as URL destination.`);
+      reasoningChain.push(`Direct IP link observed (+25 risk points).`);
     }
     if (u.isPunycode) {
-      hasPunycode = true;
-      totalRisk += 20;
-      primaryRiskFactors.push(`Internationalized Punycode homoglyph domain: '${u.domain}'.`);
-      reasoningChain.push(`Punycode homoglyph detected (+20 risk points).`);
+      observedThreatPoints += 20;
+      primaryRiskFactors.push(`Internationalized Punycode homoglyph: '${u.domain}'.`);
+      reasoningChain.push(`Punycode homoglyph observed (+20 risk points).`);
     }
   }
 
-  // Suspicious attachments
   for (const att of input.attachments) {
     if (att.isSuspiciousExtension) {
-      totalRisk += 35;
-      primaryRiskFactors.push(`Dangerous file attachment: '${att.filename}' (.${att.filename.split('.').pop()}) carries high execution risk.`);
-      reasoningChain.push(`Executable or script attachment detected: ${att.filename} (+35 risk points).`);
+      observedThreatPoints += 35;
+      primaryRiskFactors.push(`Dangerous file attachment: '${att.filename}' carries high execution risk.`);
+      reasoningChain.push(`High-risk executable/script attachment detected: ${att.filename} (+35 risk points).`);
     }
   }
 
-  // Social engineering cues
   for (const finding of input.contentFindings) {
     if (finding.findingType.startsWith('Urgency') || finding.findingType.startsWith('Credential')) {
-      totalRisk += 10;
+      observedThreatPoints += 10;
       primaryRiskFactors.push(finding.explanation);
-      reasoningChain.push(`Social engineering heuristic signal: ${finding.value} (+10 risk points).`);
+      reasoningChain.push(`Social engineering heuristic: ${finding.value} (+10 risk points).`);
     }
   }
 
-  // 4. ML Contribution (if configured)
+  // --- Step 5: ML Contribution (Independent & Calibrated) ---
   if (input.mlConfigured && typeof input.mlScore === 'number') {
-    reasoningChain.push(`--- Evaluation Stage 4: Configured ML Model (Score: ${input.mlScore}) ---`);
+    reasoningChain.push(`--- Stage 5: Calibrated ML Input (Score: ${input.mlScore}) ---`);
     if (input.mlScore > 0.7) {
-      totalRisk += 15;
-      primaryRiskFactors.push(`Configured ML model flagged text patterns as suspicious (${input.mlScore}).`);
+      observedThreatPoints += 15;
+      primaryRiskFactors.push(`Configured ML model flagged content patterns (${input.mlScore.toFixed(3)}).`);
     } else if (input.mlScore < 0.2) {
-      totalRisk = Math.max(0, totalRisk - 10);
-      mitigatingFactors.push(`Configured ML model scored text content as low risk (${input.mlScore}).`);
+      observedThreatPoints = Math.max(0, observedThreatPoints - 10);
+      mitigatingFactors.push(`Configured ML model scored text content as low risk (${input.mlScore.toFixed(3)}).`);
     }
-  } else {
-    reasoningChain.push('--- Evaluation Stage 4: ML Model (Unconfigured / Bypassed) ---');
   }
 
-  // Final score clamping
-  const normalizedScore = Math.min(100, Math.max(0, totalRisk));
-  reasoningChain.push(`Final cumulative risk score: ${normalizedScore}/100.`);
+  const normalizedObservedScore = Math.min(100, Math.max(0, observedThreatPoints));
+  reasoningChain.push(`Observed risk score: ${normalizedObservedScore}/100.`);
 
-  // Determine Assessment Label
+  // --- Step 6: Synthesis & Label Determination ---
   let label: AssessmentLabel;
   let confidenceLevel: 'high' | 'medium' | 'low';
   let summary: string;
 
-  if (hasAnchorMismatch || totalRisk >= 65) {
+  // Rule 1: High malicious signals (anchor deception, extreme risk)
+  if (hasAnchorMismatch || normalizedObservedScore >= 65) {
     label = 'likely_phishing';
-    confidenceLevel = hasAnchorMismatch || primaryRiskFactors.length >= 2 ? 'high' : 'medium';
-    summary = `Likely Phishing (Risk Score ${normalizedScore}/100): High-confidence malicious indicators detected, including ${primaryRiskFactors[0] || 'critical authentication and identity failures'}. Immediate mitigation recommended.`;
-  } else if (totalRisk >= 35) {
+    confidenceLevel = (hasAnchorMismatch || primaryRiskFactors.length >= 2) ? 'high' : 'medium';
+    summary = `Likely Phishing (Risk Score ${normalizedObservedScore}/100, Coverage ${evidenceCoverageScore}%): High-confidence malicious indicators detected (${primaryRiskFactors[0] || 'critical authentication and identity failures'}). Immediate mitigation recommended.`;
+  }
+  // Rule 2: Moderate malicious signals
+  else if (normalizedObservedScore >= 35) {
     label = 'potentially_suspicious';
-    confidenceLevel = 'medium';
-    summary = `Potentially Suspicious (Risk Score ${normalizedScore}/100): Moderate anomalies detected. While definite malicious payload was not conclusively established, ${primaryRiskFactors[0] || 'several indicators'} warrant analyst review.`;
-  } else if (totalRisk >= 15 && (!input.hasAuthenticationHeaders || !input.hasReceivedChain)) {
+    confidenceLevel = evidenceCoverageScore >= 60 ? 'medium' : 'low';
+    summary = `Potentially Suspicious (Risk Score ${normalizedObservedScore}/100, Coverage ${evidenceCoverageScore}%): Moderate anomalies detected (${primaryRiskFactors[0] || 'several indicators'}). Further analyst inspection advised.`;
+  }
+  // Rule 3: Low observed score BUT incomplete evidence coverage
+  // CRITICAL REQUIREMENT: A low heuristic score in an email with missing headers must NOT produce a high-confidence benign classification!
+  else if (evidenceCoverageScore < 65 || !input.hasAuthenticationHeaders || !input.hasReceivedChain) {
     label = 'inconclusive';
     confidenceLevel = 'low';
-    summary = `Inconclusive Analysis (Risk Score ${normalizedScore}/100): Key evidence layers (e.g. Received chain or authentication headers) were omitted in the input. Conclusions cannot be affirmed with high confidence.`;
-  } else {
+    summary = `Inconclusive Analysis (Risk Score ${normalizedObservedScore}/100, Coverage ${evidenceCoverageScore}%): Core evidence categories (${unavailableEvidenceCategories.join(', ')}) were omitted. A benign verdict cannot be affirmed without authentication and routing verification.`;
+    primaryRiskFactors.push('Incomplete forensic evidence: Missing headers or relay hops prevent origin authentication.');
+  }
+  // Rule 4: Low observed score WITH full/high evidence coverage and passing authentication
+  else {
+    const authFullyPassed = (input.authFindings.spf.result === 'pass' && input.authFindings.dkim.result === 'pass');
     label = 'likely_legitimate';
-    confidenceLevel = (input.authFindings.spf.result === 'pass' && input.authFindings.dkim.result === 'pass') ? 'high' : 'medium';
-    summary = `Likely Legitimate (Risk Score ${normalizedScore}/100): No critical deception signatures observed. Authentication and sender alignment conform to standard expectations.`;
+    confidenceLevel = authFullyPassed && evidenceCoverageScore >= 80 ? 'high' : 'medium';
+    summary = `Likely Legitimate (Risk Score ${normalizedObservedScore}/100, Coverage ${evidenceCoverageScore}%): Authentication verified (SPF/DKIM/DMARC) with valid identifier alignment and no deceptive indicators.`;
   }
 
   return {
     label,
     confidenceLevel,
-    score: normalizedScore,
+    score: normalizedObservedScore,
+    observedRiskScore: normalizedObservedScore,
+    evidenceCoverageScore,
+    availableEvidenceCategories,
+    unavailableEvidenceCategories,
     summary,
     primaryRiskFactors,
     mitigatingFactors,

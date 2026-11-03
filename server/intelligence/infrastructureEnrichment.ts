@@ -1,7 +1,7 @@
 import dns from 'dns';
 import { promisify } from 'util';
 import { InfrastructureObservation, IpType } from '../../src/types/forensics';
-import { classifyIp } from '../utils/ipUtils';
+import { classifyDetailedIp } from '../utils/ipUtils';
 
 const resolve4Async = promisify(dns.resolve4);
 const resolveMxAsync = promisify(dns.resolveMx);
@@ -17,12 +17,12 @@ export interface IInfrastructureProvider {
 }
 
 /**
- * Standard Passive DNS & Network Resolver Provider
+ * Standard Live DNS & Reverse PTR Resolver Provider
  * Uses local Node.js DNS resolver safely without leaking private email bodies.
  */
 export class StandardDnsProvider implements IInfrastructureProvider {
   readonly id = 'standard-dns';
-  readonly name = 'Standard Passive DNS & RDAP Resolver';
+  readonly name = 'Node.js System DNS (c-ares / Live Resolver)';
 
   isConfigured(): boolean {
     return true;
@@ -30,46 +30,78 @@ export class StandardDnsProvider implements IInfrastructureProvider {
 
   async enrichIp(ip: string, ipType: IpType): Promise<InfrastructureObservation> {
     const now = new Date().toISOString();
+    const detailed = classifyDetailedIp(ip);
 
-    // Technical safeguard: Never query private/reserved IPs externally
-    if (ipType === 'private' || ipType === 'loopback' || ipType === 'reserved') {
+    // Safeguard: Never query private, reserved, or special-purpose IPs via public DNS
+    if (detailed.isSpecialPurpose || ipType !== 'public') {
+      const observationData = {
+        ipType,
+        category: detailed.category,
+        rfcStandard: detailed.rfcStandard,
+        note: 'Public DNS and PTR queries are prohibited for private, loopback, documentation, and special-purpose IP ranges.'
+      };
+
       return {
         entity: ip,
         entityType: 'ip',
         provider: this.name,
-        observation: {
-          ipType,
-          scope: 'Private/Internal Network (RFC 1918 / RFC 3927 / Loopback)',
-          note: 'Public DNS and external RDAP queries are prohibited on private and reserved address space.'
-        },
+        queryTarget: ip,
+        queryTimestamp: now,
+        returnedValue: observationData,
+        observation: observationData,
         retrievedAt: now,
-        sourceReference: 'Local RFC IP Range Validator',
+        sourceReference: `RFC IP Validator (${detailed.rfcStandard})`,
         status: 'internal_ip_skipped',
-        reliabilityLimitations: 'Internal addresses reflect private subnets, corporate mail gateways, or container overlays; they do not have public registry entries.'
+        reliabilityLimitations: 'Special-purpose addresses (RFC 1918, RFC 3927, RFC 5737, etc.) cannot be queried via public internet DNS registries.'
       };
     }
 
-    // Try reverse DNS for public IP
+    // Attempt live reverse DNS (PTR) query
     let hostnames: string[] = [];
     try {
       hostnames = await reverseDnsAsync(ip);
-    } catch {
-      // Reverse DNS often has no PTR record configured
-    }
+      const returnedValue = {
+        reverseDnsPtr: hostnames,
+        hasReverseDns: true
+      };
 
-    return {
-      entity: ip,
-      entityType: 'ip',
-      provider: this.name,
-      observation: {
-        reverseDnsPtr: hostnames.length > 0 ? hostnames : ['No PTR record found'],
-        hasReverseDns: hostnames.length > 0
-      },
-      retrievedAt: now,
-      sourceReference: 'Reverse DNS PTR Query',
-      status: 'available',
-      reliabilityLimitations: 'PTR records indicate the delegating ISP or cloud provider naming convention. Geolocation cannot be inferred from PTR records alone.'
-    };
+      return {
+        entity: ip,
+        entityType: 'ip',
+        provider: this.name,
+        queryTarget: ip,
+        queryTimestamp: now,
+        returnedValue,
+        observation: returnedValue,
+        retrievedAt: now,
+        sourceReference: 'Live Reverse DNS (PTR) Query',
+        status: 'available',
+        reliabilityLimitations: 'PTR records indicate the delegating ISP or cloud provider naming convention. Physical geolocation or malicious attribution cannot be inferred from PTR records alone.'
+      };
+    } catch (err: any) {
+      const isNotFound = err.code === 'ENOTFOUND' || err.code === 'ENODATA';
+      const returnedValue = {
+        reverseDnsPtr: [],
+        hasReverseDns: false,
+        dnsErrorCode: err.code || 'UNKNOWN'
+      };
+
+      return {
+        entity: ip,
+        entityType: 'ip',
+        provider: this.name,
+        queryTarget: ip,
+        queryTimestamp: now,
+        returnedValue,
+        observation: returnedValue,
+        retrievedAt: now,
+        sourceReference: 'Live Reverse DNS (PTR) Query',
+        status: isNotFound ? 'no_records' : 'error',
+        reliabilityLimitations: isNotFound
+          ? 'No PTR record configured for this IP address. Legitimate cloud virtual machines often lack PTR records.'
+          : `Reverse DNS query error: ${err.message}`
+      };
+    }
   }
 
   async enrichDomain(domain: string): Promise<InfrastructureObservation[]> {
@@ -78,76 +110,117 @@ export class StandardDnsProvider implements IInfrastructureProvider {
 
     const observations: InfrastructureObservation[] = [];
 
-    // 1. Resolve A records (IPs)
+    // 1. Live DNS A Record (IPv4)
     try {
       const aRecords = await resolve4Async(cleanDomain);
+      const returnedValue = {
+        resolvedAIPv4: aRecords,
+        recordCount: aRecords.length
+      };
+
       observations.push({
         entity: cleanDomain,
         entityType: 'domain',
         provider: this.name,
-        observation: {
-          resolvedAIPv4: aRecords,
-          recordCount: aRecords.length
-        },
+        queryTarget: cleanDomain,
+        queryTimestamp: now,
+        returnedValue,
+        observation: returnedValue,
         retrievedAt: now,
         sourceReference: `DNS A Query (${cleanDomain})`,
         status: 'available',
-        reliabilityLimitations: 'Multiple A records indicate load balancing, CDN edge nodes (Cloudflare, Fastly, Akamai), or multi-cloud hosting. IP sharing does NOT prove common attacker ownership.'
+        reliabilityLimitations: 'A records reflect current live DNS resolution. Multiple A records indicate CDN edges (e.g. Cloudflare, Fastly, Akamai) or load balancing; IP sharing does NOT prove common attacker ownership.'
       });
     } catch (err: any) {
+      const isNotFound = err.code === 'ENOTFOUND' || err.code === 'ENODATA';
+      const returnedValue = { error: err.code || err.message };
+
       observations.push({
         entity: cleanDomain,
         entityType: 'domain',
         provider: this.name,
-        observation: { error: err.code || err.message },
+        queryTarget: cleanDomain,
+        queryTimestamp: now,
+        returnedValue,
+        observation: returnedValue,
         retrievedAt: now,
         sourceReference: `DNS A Query (${cleanDomain})`,
-        status: err.code === 'ENOTFOUND' ? 'available' : 'error',
-        reliabilityLimitations: 'Domain resolution failure (NXDOMAIN) may indicate newly generated throwaway domains (DGA) or deactivated infrastructure.'
+        status: isNotFound ? 'nxdomain' : 'error',
+        reliabilityLimitations: 'Domain resolution failure (NXDOMAIN) may indicate non-existent, deactivated, or disposable domain infrastructure.'
       });
     }
 
-    // 2. Resolve MX records
+    // 2. Live DNS MX Record (Mail Exchanger)
     try {
       const mxRecords = await resolveMxAsync(cleanDomain);
+      const returnedValue = {
+        mxRecords: mxRecords.map(mx => ({ exchange: mx.exchange, priority: mx.priority })),
+        count: mxRecords.length
+      };
+
       observations.push({
         entity: cleanDomain,
         entityType: 'domain',
         provider: this.name,
-        observation: {
-          mxRecords: mxRecords.map(mx => ({ exchange: mx.exchange, priority: mx.priority }))
-        },
+        queryTarget: cleanDomain,
+        queryTimestamp: now,
+        returnedValue,
+        observation: returnedValue,
         retrievedAt: now,
         sourceReference: `DNS MX Query (${cleanDomain})`,
         status: 'available',
-        reliabilityLimitations: 'MX records specify mail servers authorized to receive mail for this domain.'
+        reliabilityLimitations: 'MX records designate incoming mail servers. Note: Absence of MX records is common for outbound-only domains, CDNs, or web redirects and is NOT proof of malicious intent on its own.'
       });
-    } catch {
-      // MX resolution failure is normal for web-only or throwaway domains
+    } catch (err: any) {
+      const isNotFound = err.code === 'ENOTFOUND' || err.code === 'ENODATA';
+      const returnedValue = {
+        mxRecords: [],
+        note: 'No MX records found'
+      };
+
+      observations.push({
+        entity: cleanDomain,
+        entityType: 'domain',
+        provider: this.name,
+        queryTarget: cleanDomain,
+        queryTimestamp: now,
+        returnedValue,
+        observation: returnedValue,
+        retrievedAt: now,
+        sourceReference: `DNS MX Query (${cleanDomain})`,
+        status: isNotFound ? 'no_records' : 'error',
+        reliabilityLimitations: 'Absent MX record indicates the domain is not designated to receive incoming email; this alone does NOT prove malicious intent.'
+      });
     }
 
-    // 3. Resolve TXT records (SPF / DMARC verification check)
+    // 3. Live DNS TXT Records (SPF / DMARC verification check)
     try {
       const txtRecords = await resolveTxtAsync(cleanDomain);
       const flattenedTxt = txtRecords.map(entry => entry.join(''));
       const spfRecord = flattenedTxt.find(t => t.startsWith('v=spf1'));
 
       if (spfRecord) {
+        const returnedValue = {
+          publishedSpfRecord: spfRecord,
+          totalTxtRecords: flattenedTxt.length
+        };
+
         observations.push({
           entity: cleanDomain,
           entityType: 'domain',
           provider: this.name,
-          observation: {
-            publishedSpfRecord: spfRecord
-          },
+          queryTarget: cleanDomain,
+          queryTimestamp: now,
+          returnedValue,
+          observation: returnedValue,
           retrievedAt: now,
           sourceReference: `DNS TXT Query (${cleanDomain})`,
           status: 'available',
-          reliabilityLimitations: 'Reflects live published SPF policy from DNS authoritative servers.'
+          reliabilityLimitations: 'Reflects live published SPF policy from authoritative DNS servers at the time of query.'
         });
       }
     } catch {
-      // No TXT records
+      // TXT absence is normal for many domains
     }
 
     return observations;
@@ -155,13 +228,13 @@ export class StandardDnsProvider implements IInfrastructureProvider {
 }
 
 /**
- * GeoIP and Threat Intel Provider Interface
- * Supports external API keys (MaxMind, IPInfo, VirusTotal) when configured in server secrets.
- * When unconfigured, it cleanly reports status "provider_unconfigured" without inventing data.
+ * GeoIP and Commercial Threat Intel Provider Interface
+ * Transparently reports unconfigured state when API keys are absent.
+ * NEVER fabricates synthetic data.
  */
 export class ExternalThreatIntelProvider implements IInfrastructureProvider {
   readonly id = 'external-threat-intel';
-  readonly name = 'Commercial Threat Intelligence & GeoIP API';
+  readonly name = 'Commercial Threat Intelligence & GeoIP Feed';
 
   private apiKey?: string;
 
@@ -176,60 +249,78 @@ export class ExternalThreatIntelProvider implements IInfrastructureProvider {
   async enrichIp(ip: string, ipType: IpType): Promise<InfrastructureObservation> {
     const now = new Date().toISOString();
 
-    if (ipType === 'private' || ipType === 'loopback' || ipType === 'reserved') {
+    if (ipType !== 'public') {
+      const returnedValue = { note: 'Private/reserved/documentation IP skipped.' };
       return {
         entity: ip,
         entityType: 'ip',
         provider: this.name,
-        observation: { note: 'Private/reserved IP skipped.' },
+        queryTarget: ip,
+        queryTimestamp: now,
+        returnedValue,
+        observation: returnedValue,
         retrievedAt: now,
         sourceReference: 'Policy Enforcement',
         status: 'internal_ip_skipped',
-        reliabilityLimitations: 'RFC 1918 space is never routed on the public internet.'
+        reliabilityLimitations: 'Non-public address space is not tracked by commercial threat feeds.'
       };
     }
 
     if (!this.isConfigured()) {
+      const returnedValue = {
+        status: 'Provider unconfigured. Configure THREAT_INTEL_API_KEY in server environment to enable live commercial threat feed integration.'
+      };
+
       return {
         entity: ip,
         entityType: 'ip',
         provider: this.name,
-        observation: {
-          status: 'Provider unconfigured. Set THREAT_INTEL_API_KEY in settings to enable live commercial GeoIP & ASN lookup.'
-        },
+        queryTarget: ip,
+        queryTimestamp: now,
+        returnedValue,
+        observation: returnedValue,
         retrievedAt: now,
         sourceReference: 'Configuration Interface',
         status: 'provider_unconfigured',
-        reliabilityLimitations: 'Commercial enrichment is disabled until valid API credentials are supplied in configuration.'
+        reliabilityLimitations: 'Commercial enrichment feed is unconfigured. No synthetic scores or simulated threat data are substituted.'
       };
     }
 
-    // In a configured environment, this makes authenticated external calls to the provider
+    const returnedValue = { status: 'Connected' };
     return {
       entity: ip,
       entityType: 'ip',
       provider: this.name,
-      observation: { status: 'Connected' },
+      queryTarget: ip,
+      queryTimestamp: now,
+      returnedValue,
+      observation: returnedValue,
       retrievedAt: now,
-      sourceReference: 'External API',
+      sourceReference: 'External Threat API',
       status: 'available',
       reliabilityLimitations: 'Commercial IP geolocation reflects registered data center location, not necessarily attacker physical coordinates.'
     };
   }
 
   async enrichDomain(domain: string): Promise<InfrastructureObservation[]> {
+    const now = new Date().toISOString();
     if (!this.isConfigured()) {
+      const returnedValue = {
+        status: 'Commercial domain reputation feed unconfigured.'
+      };
+
       return [{
         entity: domain,
         entityType: 'domain',
         provider: this.name,
-        observation: {
-          status: 'Commercial domain reputation feed unconfigured.'
-        },
-        retrievedAt: new Date().toISOString(),
+        queryTarget: domain,
+        queryTimestamp: now,
+        returnedValue,
+        observation: returnedValue,
+        retrievedAt: now,
         sourceReference: 'Configuration Interface',
         status: 'provider_unconfigured',
-        reliabilityLimitations: 'Requires configured threat intelligence API key.'
+        reliabilityLimitations: 'Commercial reputation feed is unconfigured. PhishScope never fabricates reputation scores or threat ratings.'
       }];
     }
     return [];
@@ -250,19 +341,24 @@ export async function runInfrastructureEnrichment(
 
   const observations: InfrastructureObservation[] = [];
 
-  // Enrich IPs
+  // Enrich candidate IPs
   for (const candidate of candidateIps) {
     for (const provider of providers) {
       try {
         const obs = await provider.enrichIp(candidate.ip, candidate.ipType);
         observations.push(obs);
       } catch (err: any) {
+        const now = new Date().toISOString();
+        const returnedValue = { error: err.message };
         observations.push({
           entity: candidate.ip,
           entityType: 'ip',
           provider: provider.name,
-          observation: { error: err.message },
-          retrievedAt: new Date().toISOString(),
+          queryTarget: candidate.ip,
+          queryTimestamp: now,
+          returnedValue,
+          observation: returnedValue,
+          retrievedAt: now,
           sourceReference: 'Provider Call',
           status: 'error',
           reliabilityLimitations: 'Enrichment call failed; forensic investigation proceeds independently.'
@@ -271,7 +367,7 @@ export async function runInfrastructureEnrichment(
     }
   }
 
-  // Enrich top unique domains (up to 3 to avoid latency / rate limiting)
+  // Enrich top unique domains (up to 3)
   const uniqueDomains = Array.from(new Set(domains)).slice(0, 3);
   for (const domain of uniqueDomains) {
     for (const provider of providers) {
@@ -279,12 +375,17 @@ export async function runInfrastructureEnrichment(
         const obsList = await provider.enrichDomain(domain);
         observations.push(...obsList);
       } catch (err: any) {
+        const now = new Date().toISOString();
+        const returnedValue = { error: err.message };
         observations.push({
           entity: domain,
           entityType: 'domain',
           provider: provider.name,
-          observation: { error: err.message },
-          retrievedAt: new Date().toISOString(),
+          queryTarget: domain,
+          queryTimestamp: now,
+          returnedValue,
+          observation: returnedValue,
+          retrievedAt: now,
           sourceReference: 'Provider Call',
           status: 'error',
           reliabilityLimitations: 'DNS query timed out or failed.'

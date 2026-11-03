@@ -17,7 +17,9 @@ export interface EmailGraphBuildInput {
 }
 
 /**
- * Builds an infrastructure relationship graph for a single email
+ * Builds an infrastructure relationship graph for a single email.
+ * Every node and edge captures entity type, relationship type, evidence source,
+ * timestamp, directly observed vs inferred relationship, and confidence indicator.
  */
 export function buildEmailGraph(input: EmailGraphBuildInput): { nodes: GraphNode[]; edges: GraphEdge[] } {
   const nodesMap = new Map<string, GraphNode>();
@@ -54,8 +56,10 @@ export function buildEmailGraph(input: EmailGraphBuildInput): { nodes: GraphNode
       relationshipType: 'SENT_FROM',
       evidenceReferences: ['From Header'],
       confidence: 'confirmed_direct',
+      isDirectlyObserved: true,
+      relationshipNature: 'directly_observed',
       observedAt: now,
-      supportingObservation: 'Direct From header declaration.'
+      supportingObservation: 'Direct RFC 5322 From header declaration.'
     });
 
     if (input.envelope.from.domain) {
@@ -72,9 +76,12 @@ export function buildEmailGraph(input: EmailGraphBuildInput): { nodes: GraphNode
         sourceNode: senderAddrId,
         targetNode: senderDomainId,
         relationshipType: 'ASSOCIATED_WITH',
-        evidenceReferences: ['RFC 5322 Address Syntax'],
+        evidenceReferences: ['RFC 5322 Address Parsing'],
         confidence: 'confirmed_direct',
-        observedAt: now
+        isDirectlyObserved: true,
+        relationshipNature: 'directly_observed',
+        observedAt: now,
+        supportingObservation: 'Domain parsed from mailbox syntax.'
       });
     }
   }
@@ -97,8 +104,10 @@ export function buildEmailGraph(input: EmailGraphBuildInput): { nodes: GraphNode
       relationshipType: 'ROUTED_THROUGH',
       evidenceReferences: ['Received Hops'],
       confidence: 'derived',
+      isDirectlyObserved: false,
+      relationshipNature: 'inferred',
       observedAt: now,
-      supportingObservation: `Identified candidate sending IP with confidence ${candidate.confidence}.`
+      supportingObservation: `Identified candidate sending IP with confidence ${candidate.confidence}. Derived from chronological hop reconstruction.`
     });
   }
 
@@ -123,9 +132,13 @@ export function buildEmailGraph(input: EmailGraphBuildInput): { nodes: GraphNode
         targetNode: serverNodeId,
         relationshipType: 'ROUTED_THROUGH',
         evidenceReferences: [`Received Hop #${hopIndex}`],
-        confidence: 'confirmed_direct',
+        confidence: hop.isBorderHop ? 'confirmed_direct' : 'derived',
+        isDirectlyObserved: hop.isBorderHop,
+        relationshipNature: hop.isBorderHop ? 'directly_observed' : 'inferred',
         observedAt: now,
-        supportingObservation: `Processed by mail relay at hop #${hopIndex}.`
+        supportingObservation: hop.isBorderHop
+          ? `Logged by trusted recipient border MTA (hop position #${hop.rawPositionFromTop}).`
+          : `Processed by mail relay at chronological hop #${hopIndex}.`
       });
     }
   }
@@ -155,7 +168,10 @@ export function buildEmailGraph(input: EmailGraphBuildInput): { nodes: GraphNode
         relationshipType: 'OBSERVED_IN_EMAIL',
         evidenceReferences: ['Message Body'],
         confidence: 'confirmed_direct',
-        observedAt: now
+        isDirectlyObserved: true,
+        relationshipNature: 'directly_observed',
+        observedAt: now,
+        supportingObservation: 'Direct observation in HTML or plain text message body.'
       });
 
       if (url.domain) {
@@ -176,13 +192,16 @@ export function buildEmailGraph(input: EmailGraphBuildInput): { nodes: GraphNode
           relationshipType: 'RESOLVES_TO',
           evidenceReferences: ['URL Authority Component'],
           confidence: 'confirmed_direct',
-          observedAt: now
+          isDirectlyObserved: true,
+          relationshipNature: 'directly_observed',
+          observedAt: now,
+          supportingObservation: 'URL authority component extracted via RFC 3986 parser.'
         });
       }
     }
   }
 
-  // 6. External DNS / Infrastructure Observations
+  // 6. External DNS Observations
   for (const obs of input.observations) {
     if (obs.status === 'available' && obs.observation.resolvedAIPv4) {
       const domainNodeId = `domain:${obs.entity.toLowerCase()}`;
@@ -203,10 +222,12 @@ export function buildEmailGraph(input: EmailGraphBuildInput): { nodes: GraphNode
             sourceNode: domainNodeId,
             targetNode: aIpNodeId,
             relationshipType: 'RESOLVES_TO',
-            evidenceReferences: ['Passive DNS Query'],
+            evidenceReferences: ['Live DNS Query'],
             confidence: 'derived',
+            isDirectlyObserved: false,
+            relationshipNature: 'inferred',
             observedAt: now,
-            supportingObservation: `Live DNS A record resolved ${obs.entity} to ${aIp}.`
+            supportingObservation: `Live DNS A record resolved ${obs.entity} to ${aIp}. Caveat: shared CDN or multi-tenant IP does not indicate common ownership.`
           });
         }
       }
@@ -222,7 +243,7 @@ export function buildEmailGraph(input: EmailGraphBuildInput): { nodes: GraphNode
 /**
  * Builds a global session correlation graph across all analyzed emails.
  * Detects shared candidate IPs, sender domains, and URLs.
- * Emits SHARES_INFRASTRUCTURE_WITH edges with explicit exploratory caveats!
+ * Emits SHARES_INFRASTRUCTURE_WITH edges with explicit caveats regarding shared hosting and multi-tenant services.
  */
 export function buildSessionCorrelationGraph(analyses: Array<{
   analysisId: string;
@@ -236,7 +257,6 @@ export function buildSessionCorrelationGraph(analyses: Array<{
   const edges: GraphEdge[] = [];
   const now = new Date().toISOString();
 
-  // Maps to find intersections
   const ipToEmails = new Map<string, string[]>();
   const domainToEmails = new Map<string, string[]>();
 
@@ -266,6 +286,8 @@ export function buildSessionCorrelationGraph(analyses: Array<{
         relationshipType: 'SENT_FROM',
         evidenceReferences: ['From Header'],
         confidence: 'confirmed_direct',
+        isDirectlyObserved: true,
+        relationshipNature: 'directly_observed',
         observedAt: now
       });
 
@@ -291,6 +313,8 @@ export function buildSessionCorrelationGraph(analyses: Array<{
         relationshipType: 'ROUTED_THROUGH',
         evidenceReferences: ['Received Hops'],
         confidence: 'derived',
+        isDirectlyObserved: false,
+        relationshipNature: 'inferred',
         observedAt: now
       });
 
@@ -312,8 +336,10 @@ export function buildSessionCorrelationGraph(analyses: Array<{
             relationshipType: 'SHARES_INFRASTRUCTURE_WITH',
             evidenceReferences: [`Candidate IP ${ip}`],
             confidence: 'hypothesized',
+            isDirectlyObserved: false,
+            relationshipNature: 'correlated',
             observedAt: now,
-            supportingObservation: `Both messages route through common IP ${ip}. Exploratory correlation: shared infrastructure does not prove unified actor ownership without corroborating campaign indicators.`
+            supportingObservation: `Both messages route through common IP ${ip}. Exploratory correlation: shared hosting providers, shared mail relays, or multi-tenant CDNs do NOT prove common ownership or unified attacker attribution.`
           });
         }
       }
