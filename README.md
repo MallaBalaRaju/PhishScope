@@ -312,3 +312,5 @@ This project is for academic and research purposes.
 Developed as part of a Cybersecurity Capstone Project.
 
 > *"Evidence-grounded, privacy-first email threat intelligence."*
+#   P h i s h S c o p e  
+ 
