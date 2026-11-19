@@ -1,17 +1,30 @@
 import time
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
-from .schemas import (
-    PredictionRequest, 
-    StandardizedModelPrediction, 
-    ModelHealthResponse
-)
-from .models import (
-    TfidfLogisticRegressionModel,
-    TfidfLinearSvmModel,
-    GbdtStructuredForensicsModel,
-    TransformerClassifierModel
-)
+try:
+    from .schemas import (
+        PredictionRequest, 
+        StandardizedModelPrediction, 
+        ModelHealthResponse
+    )
+    from .models import (
+        TfidfLogisticRegressionModel,
+        TfidfLinearSvmModel,
+        GbdtStructuredForensicsModel,
+        TransformerClassifierModel
+    )
+except ImportError:
+    from schemas import (
+        PredictionRequest, 
+        StandardizedModelPrediction, 
+        ModelHealthResponse
+    )
+    from models import (
+        TfidfLogisticRegressionModel,
+        TfidfLinearSvmModel,
+        GbdtStructuredForensicsModel,
+        TransformerClassifierModel
+    )
 
 app = FastAPI(
     title="PhishScope Python ML Microservice",
@@ -26,6 +39,24 @@ MODELS = {
     "gbdt-structured-forensics": GbdtStructuredForensicsModel(),
     "transformer-classifier": TransformerClassifierModel()
 }
+
+@app.get("/")
+def root():
+    """Root endpoint providing service summary and API docs link"""
+    return {
+        "service": "PhishScope ML Serving Microservice",
+        "status": "online",
+        "version": "1.0.0",
+        "docsUrl": "/docs",
+        "modelsCount": len(MODELS),
+        "availableModels": list(MODELS.keys()),
+        "endpoints": {
+            "docs": "/docs",
+            "health": "/health",
+            "models": "/models",
+            "predict": "/predict (POST)"
+        }
+    }
 
 @app.get("/health", response_model=ModelHealthResponse)
 def health_check():

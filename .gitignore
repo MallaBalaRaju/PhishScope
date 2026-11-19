@@ -6,3 +6,16 @@ coverage/
 *.log
 .env*
 !.env.example
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyc
+
+# Large binary / data files — do not commit to git
+dataset/
+ml-service/saved_models/
+*.pkl
+*.csv
+
